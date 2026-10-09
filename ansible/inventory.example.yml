@@ -1,0 +1,18 @@
+# Copy to inventory.yml and adjust. inventory.yml is gitignored.
+#
+# One LXC per category. Give each instance a different preferred PIA region so
+# they don't all share one exit server's upload bandwidth, and keep each host's
+# fallback pool on separate PIA clusters (nearby virtual regions are often
+# hosted together and go down together). Only port-forward-capable regions
+# work; run `/scripts/wg-gen.sh -a` inside a PIA container to list them.
+all:
+  children:
+    proxmox_hosts:
+      hosts:
+        proxmox: { ansible_host: 192.168.1.10 }
+    qbittorrent:
+      hosts:
+        qbittorrent-movies: { ansible_host: 192.168.1.151, qbt_instance: movies, pia_loc: mexico, pia_loc_fallbacks: [ca_toronto, swiss], qbt_vuetorrent: true, qbt_webui_title: Movies }
+        qbittorrent-tv:     { ansible_host: 192.168.1.152, qbt_instance: tv, pia_loc: denmark, pia_loc_fallbacks: [swiss, ca_toronto], qbt_vuetorrent: true, qbt_webui_title: TV }
+        qbittorrent-books:  { ansible_host: 192.168.1.153, qbt_instance: books, pia_loc: panama, pia_loc_fallbacks: [mexico, denmark], qbt_vuetorrent: true, qbt_webui_title: Books, qbt_firefox: true }
+        qbittorrent-games:  { ansible_host: 192.168.1.154, qbt_instance: games, pia_loc: lu, pia_loc_fallbacks: [ca, swiss], qbt_save_path: /data/games, qbt_vuetorrent: true, qbt_webui_title: Games, qbt_incomplete_ext: true }

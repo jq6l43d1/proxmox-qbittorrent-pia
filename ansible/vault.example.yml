@@ -1,0 +1,5 @@
+---
+vault_pia_user: "p0000000"
+vault_pia_pass: "your-pia-password"
+# Output of: python3 scripts/qbt-password-hash.py
+vault_qbt_webui_password_pbkdf2: "salt-base64==:hash-base64=="

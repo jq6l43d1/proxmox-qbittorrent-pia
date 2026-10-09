@@ -1,0 +1,185 @@
+name: qbittorrent-{{ qbt_instance }}
+services:
+  pia-wireguard:
+    image: thrnz/docker-wireguard-pia
+    container_name: pia-wireguard-{{ qbt_instance }}
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # Region-rotation wrapper (see pia-entrypoint.sh): picks LOC from LOC_POOL,
+    # advancing one region per restart until port forwarding sticks. Replaces a
+    # plain LOC= env: the image's own LOC fallback list only covers registration
+    # failures, not a region whose PF API is dead while the tunnel works
+    # (seen during a PIA cluster outage that took out two regions at once).
+    entrypoint: ["/sbin/tini", "--", "/pia-entrypoint.sh"]
+    volumes:
+      - pia-shared:/pia-shared
+      - ./pia-entrypoint.sh:/pia-entrypoint.sh:ro
+    environment:
+      - USER={{ pia_user }}
+      - PASS={{ pia_pass }}
+      - LOC_POOL={{ ([pia_loc] + (pia_loc_fallbacks | default([]))) | join(',') }}
+      - PORT_FORWARDING=1
+      - PORT_FILE=/pia-shared/port.dat
+      - PORT_PERSIST=1
+      - LOCAL_NETWORK={{ qbt_local_networks | join(',') }}
+      - KEEPALIVE=25
+      - FIREWALL=1
+      # Exit (and let restart:unless-stopped recreate the container) if the tunnel or the
+      # port-forward keepalive hits a fatal error. NOTE: PORT_FATAL is currently defeated by
+      # an upstream bug: run launches `pf.sh | sed &` and captures sed's PID, so a pf.sh
+      # death reads as exit 0 and the "Port forwarding script failed" fatal path never fires
+      # (the log shows "closed", not "failed"). Kept in case upstream fixes it; until then
+      # PF-death recovery = healthcheck below -> autoheal restart -> loc-rotate failover.
+      - EXIT_ON_FATAL=1
+      - PORT_FATAL=1
+      # Enable the built-in endpoint monitor: checks tunnel health every
+      # MONITOR_INTERVAL seconds (default 60) and after MONITOR_RETRIES
+      # consecutive failures (default 3) tears down the stale WireGuard peer,
+      # re-authenticates with PIA, and brings up a fresh tunnel + port forward.
+      # Without this the container sits in sleep-infinity after a tunnel death
+      # because Docker only restarts on exit, not on unhealthy health checks.
+      - RECONNECT=1
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    # Same script the image's built-in HEALTHCHECK runs (wg up + pf.sh alive), but with
+    # tighter timings so autoheal notices a dead port-forward in ~2-3 min instead of ~4,
+    # which bounds a full LOC_POOL rotation to a few minutes. start_period covers the
+    # normal token/registration/PF startup so slow boots don't count as failures.
+    healthcheck:
+      test: ["CMD", "/scripts/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    ports:
+      - "8080:8080"
+{% if qbt_firefox | default(false) %}
+      # Firefox Selkies WebRTC UI. HTTPS required (WebRTC needs a secure context).
+      # Uses a self-signed cert on port 3001; accept it in the browser.
+      - "{{ qbt_firefox_port | default('3001') }}:3001"
+{% endif %}
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent-{{ qbt_instance }}
+    network_mode: "container:pia-wireguard-{{ qbt_instance }}"
+    depends_on:
+      - pia-wireguard
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
+      # s6-overlay kills services ~3s after SIGTERM by default, so docker-level
+      # stop grace never reaches qBittorrent. It gets SIGKILLed mid-shutdown
+      # before persisting the session (fastresume), dropping recently-added
+      # torrents on the next boot (-> private-tracker H&R warnings). Give the
+      # supervision tree 2 minutes; stop_grace_period below must exceed this.
+      - S6_SERVICES_GRACETIME=120000
+      - S6_KILL_GRACETIME=120000
+      # Optional per-instance default save path (e.g. /data/games); blank = leave qBittorrent's default.
+      - QBT_SAVE_PATH={{ qbt_save_path | default('') }}
+      # Optional WebUI instance name ([Application]\InstanceName). VueTorrent uses it as the browser
+      # tab title (stock WebUI prepends it too); blank = leave default.
+      - QBT_INSTANCE_NAME={{ qbt_webui_title | default('') }}
+      # Append .!qB to incomplete files (Session\\UseIncompleteFileExtension). Off by default;
+      # enabled per-instance via qbt_incomplete_ext so downstream tooling (e.g. an
+      # extraction script) can tell finished downloads from in-progress ones by filename. Blank = leave default.
+      - QBT_INCOMPLETE_EXT={{ '1' if (qbt_incomplete_ext | default(false)) else '' }}
+      # PBKDF2 hash of the shared WebUI password. The custom-init script writes
+      # this to qBittorrent.conf on every boot so all instances use the same
+      # password. Set as an env var so the hash isn't hardcoded in the script.
+      - QBT_WEBUI_PASSWORD_PBKDF2={{ qbt_webui_password_pbkdf2 | default('') }}
+{% if qbt_vuetorrent | default(false) %}
+      # VueTorrent alternative WebUI. Staged onto the LXC by the role (NOT the LSIO docker mod:
+      # this container shares the VPN netns and runs mod-init before the tunnel is up, so a
+      # runtime fetch from lscr.io fails every boot). The init script points RootFolder here.
+      - QBT_ALT_WEBUI_ROOT=/vuetorrent
+{% endif %}
+    volumes:
+      # qBittorrent config (settings + resume data) lives on shared storage, not the LXC rootfs:
+      - /data/appdata/qbittorrent-{{ qbt_instance }}:/config
+      # Shared storage mounted at /data so saved torrent paths (/data/<category>) resolve
+      # and qBittorrent rechecks/seeds the existing files instead of re-downloading:
+      - /data:/data
+      - pia-shared:/pia-shared:ro
+      - ./custom-init:/custom-cont-init.d:ro
+{% if qbt_vuetorrent | default(false) %}
+      # VueTorrent static bundle, staged at /opt/qbittorrent-<instance>/vuetorrent by the role:
+      - ./vuetorrent:/vuetorrent:ro
+{% endif %}
+    # Docker's default SIGTERM->SIGKILL grace is 10s; qBittorrent needs longer to
+    # persist the session (fastresume) with thousands of torrents loaded. A KILL
+    # before the save drops recently-added torrents from the session -> private
+    # tracker hit-and-run warnings. Applies to compose down/up recreations
+    # (systemd ExecStop, auto-update timer). Must exceed the S6_*_GRACETIME
+    # values above so s6, not docker, decides when to give up.
+    stop_grace_period: 3m
+    restart: unless-stopped
+
+{% if qbt_firefox | default(false) %}
+  # Firefox browser routed through the PIA VPN tunnel. Shares the VPN netns so
+  # all browser traffic exits via WireGuard. KasmVNC WebUI on port 3000.
+  # Opt-in per instance via qbt_firefox: true in inventory.
+  firefox:
+    image: lscr.io/linuxserver/firefox:latest
+    container_name: firefox-{{ qbt_instance }}
+    network_mode: "container:pia-wireguard-{{ qbt_instance }}"
+    depends_on:
+      - pia-wireguard
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - /data/appdata/firefox-{{ qbt_instance }}:/config
+    shm_size: "1gb"
+    restart: unless-stopped
+{% endif %}
+
+  # Safety net: Docker does not restart containers that are "unhealthy" but still
+  # running (exit != 0 is required for restart policies to kick in). Autoheal
+  # watches Docker health checks and restarts containers that stay unhealthy for
+  # AUTOHEAL_INTERVAL (default 5) consecutive checks. Covers the case where
+  # RECONNECT's endpoint monitor itself cannot recover the tunnel.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal-{{ qbt_instance }}
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=60
+      - AUTOHEAL_START_PERIOD=120
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Netns watcher: when the PIA container is recreated (by autoheal, RECONNECT,
+  # or Docker restart), it gets a fresh network namespace. But Docker does NOT
+  # restart containers that use network_mode: "container:...". The qbittorrent
+  # container stays "Up" in the OLD dead netns, and its WebUI listener vanishes
+  # from the new netns. This sidecar polls the PIA container's StartedAt and
+  # restarts qbittorrent when it changes, so qBittorrent re-joins the fresh netns.
+  netns-watcher:
+    image: docker:cli
+    container_name: netns-watcher-{{ qbt_instance }}
+    restart: unless-stopped
+    environment:
+      - PIA_CONTAINER=pia-wireguard-{{ qbt_instance }}
+      - QBT_CONTAINER=qbittorrent-{{ qbt_instance }}
+      - QBT_SERVICE=qbittorrent
+      - QBT_INSTANCE={{ qbt_instance }}
+      - WATCH_INTERVAL=15
+      # SIGTERM grace before SIGKILL when the watcher stops qBittorrent, so the
+      # session (fastresume) is persisted before the netns recreate. Must exceed
+      # the qbittorrent service's S6_*_GRACETIME (120s) so s6 finishes first:
+      - STOP_TIMEOUT=150
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./netns-watcher.sh:/netns-watcher.sh:ro
+      - ./compose.yaml:/opt/qbittorrent-{{ qbt_instance }}/compose.yaml:ro
+    entrypoint: ["/bin/sh", "/netns-watcher.sh"]
+
+volumes:
+  pia-shared:

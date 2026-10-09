@@ -1,0 +1,23 @@
+# Secrets and site-specific config (copy from the *.example files)
+ansible/inventory.yml
+ansible/vault.yml
+ansible/group_vars/**/vault.yml
+*.vault.yml
+.vault_pass*
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/crash.log
+
+# Python / editors / OS
+__pycache__/
+*.pyc
+*.retry
+.vscode/
+.idea/
+.DS_Store

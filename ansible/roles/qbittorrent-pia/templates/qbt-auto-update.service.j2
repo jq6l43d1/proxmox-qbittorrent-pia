@@ -1,0 +1,30 @@
+[Unit]
+Description=Auto-update qbittorrent-{{ qbt_instance }} container images
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qbittorrent-{{ qbt_instance }}
+# Prune BEFORE pulling too, not just after. The post-pull prune below only runs
+# when the pull succeeds, so once the disk fills mid-pull (ENOSPC), every later
+# run fails at ExecStart and the prune is never reached again, while each failed
+# pull leaves more partial layers behind. That death spiral took one of my
+# instances (20G root, 4.4G Firefox sidecar image) to 100% full: five consecutive
+# nightly failures with "no space left on device". Pre-pruning breaks the cycle:
+# space is reclaimed at the start of every run regardless of the last outcome.
+# "-" prefix: a prune hiccup must not abort the update itself.
+ExecStartPre=-/usr/bin/docker image prune -a -f
+ExecStart=/usr/bin/docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml pull
+# Force-recreate ALL containers after pulling. Without --force-recreate, compose
+# only recreates containers whose image changed. When PIA's image changes but
+# qBittorrent's doesn't, qBittorrent is left "Running" in the OLD (now-dead) PIA
+# netns. Its WebUI vanishes and the netns-watcher's docker restart fails because
+# the old PIA container is already removed. Force-recreating everything ensures
+# qBittorrent is recreated against the fresh PIA container's netns.
+ExecStartPost=/usr/bin/docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml up -d --force-recreate
+# Prune dangling/unused images left after pulling new ones. Without this, old image
+# layers accumulate in /var/lib/containerd and fill the 20G root disk, especially
+# on instances with the Firefox sidecar (4.4 GB image). --all flag removes images
+# not referenced by any container (safe after force-recreate recreated everything).
+ExecStartPost=-/usr/bin/docker image prune -a -f

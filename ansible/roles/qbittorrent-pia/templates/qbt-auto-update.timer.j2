@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic auto-update for qbittorrent-{{ qbt_instance }} container images
+
+[Timer]
+OnCalendar={{ qbt_auto_update_schedule | default('*-*-* 04:30:00') }}
+Persistent=true
+RandomizedDelaySec={{ qbt_auto_update_random_delay | default(300) }}
+
+[Install]
+WantedBy=timers.target

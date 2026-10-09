@@ -1,0 +1,6 @@
+---
+- name: Configure qBittorrent + PIA instances
+  hosts: qbittorrent
+  gather_facts: false
+  roles:
+    - qbittorrent-pia

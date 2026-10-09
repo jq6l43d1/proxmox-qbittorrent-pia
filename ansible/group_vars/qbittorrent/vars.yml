@@ -1,0 +1,10 @@
+---
+# Secrets come from vault.yml in this directory (gitignored). Create it with:
+#   cp vault.example.yml group_vars/qbittorrent/vault.yml
+#   ansible-vault encrypt group_vars/qbittorrent/vault.yml
+pia_user: "{{ vault_pia_user }}"
+pia_pass: "{{ vault_pia_pass }}"
+qbt_webui_password_pbkdf2: "{{ vault_qbt_webui_password_pbkdf2 }}"
+
+# Where the shared storage lives on the Proxmox host (bind-mounted at /data in each LXC).
+qbt_host_storage: /tank

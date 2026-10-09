@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+pm_api_url          = "https://192.168.1.10:8006/api2/json"
+pm_api_token_id     = "terraform@pve!iac"
+pm_api_token_secret = "00000000-0000-0000-0000-000000000000"
+gateway             = "192.168.1.1"
+
+instances = {
+  "qbittorrent-movies" = { vmid = 151, ip = "192.168.1.151/24" }
+  "qbittorrent-tv"     = { vmid = 152, ip = "192.168.1.152/24", memory = 4096 }
+  "qbittorrent-books"  = { vmid = 153, ip = "192.168.1.153/24", memory = 2048 }
+  "qbittorrent-games"  = { vmid = 154, ip = "192.168.1.154/24", memory = 4096 }
+}

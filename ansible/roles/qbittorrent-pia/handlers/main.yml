@@ -1,0 +1,19 @@
+---
+# Apply a changed compose.yaml to the running stack. The systemd unit is
+# Type=oneshot + RemainAfterExit=yes, so "Enable + start stack" is a no-op once
+# the unit is already active -- it renders a new compose.yaml but never
+# recreates the containers. This handler runs `docker compose up -d` (which
+# recreates only the services whose definition changed) whenever the render
+# task reports changed, so env/image edits deploy in a single play run.
+- name: Recreate qbittorrent stack
+  command: docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml up -d
+
+# Custom-init scripts are bind-mounted, so editing them changes no container
+# definition and "up -d" is a no-op. They only run at container start, so a
+# changed script needs an explicit restart of the qbittorrent service (honors
+# stop_grace_period, so the session is persisted first).
+- name: Restart qbittorrent service
+  command: docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml restart qbittorrent
+
+- name: Reload systemd for qbt auto-update
+  command: systemctl daemon-reload

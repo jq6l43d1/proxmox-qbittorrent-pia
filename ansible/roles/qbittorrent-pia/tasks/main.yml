@@ -1,0 +1,141 @@
+---
+# qBittorrent + PIA WireGuard, one stack per LXC (one LXC per category). The qBittorrent
+# config lives at <qbt_host_storage>/appdata/qbittorrent-<instance> on the Proxmox host;
+# that storage is bind-mounted at /data so the torrents' save paths resolve and qBittorrent
+# seeds the existing files rather than re-downloading. /dev/net/tun is passed through
+# host-side (see host/apply-tun-passthrough.sh).
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  changed_when: false
+- name: Install prerequisites
+  apt:
+    name: [curl, ca-certificates]
+    state: present
+- name: Check if Docker is installed
+  command: which docker
+  register: docker_check
+  failed_when: false
+  changed_when: false
+- name: Install Docker
+  when: docker_check.rc != 0
+  shell: curl -fsSL https://get.docker.com | sh
+- name: Create stack dir
+  file:
+    path: /opt/qbittorrent-{{ qbt_instance }}
+    state: directory
+- name: Install custom-init scripts
+  copy:
+    src: custom-init/
+    dest: /opt/qbittorrent-{{ qbt_instance }}/custom-init/
+    mode: "0755"
+  notify: Restart qbittorrent service
+- name: Install netns-watcher script
+  copy:
+    src: netns-watcher.sh
+    dest: /opt/qbittorrent-{{ qbt_instance }}/netns-watcher.sh
+    mode: "0755"
+  notify: Recreate qbittorrent stack
+- name: Install PIA region-rotation entrypoint
+  copy:
+    src: pia-entrypoint.sh
+    dest: /opt/qbittorrent-{{ qbt_instance }}/pia-entrypoint.sh
+    mode: "0755"
+  notify: Recreate qbittorrent stack
+# VueTorrent alternative WebUI (opt-in via qbt_vuetorrent). Staged here on the LXC rather than via
+# the LSIO docker mod, because the qbittorrent container shares the PIA VPN netns and runs mod-init
+# before the tunnel is up, so a runtime fetch from lscr.io fails. The LXC has normal LAN egress.
+- name: Install unzip (for VueTorrent extraction)
+  when: qbt_vuetorrent | default(false)
+  apt:
+    name: unzip
+    state: present
+- name: Stage VueTorrent static bundle
+  when: qbt_vuetorrent | default(false)
+  ansible.builtin.unarchive:
+    src: "{{ vuetorrent_url | default('https://github.com/VueTorrent/VueTorrent/releases/latest/download/vuetorrent.zip') }}"
+    dest: "/opt/qbittorrent-{{ qbt_instance }}/"
+    remote_src: yes
+    # Zip extracts to vuetorrent/{public/index.html, version.txt}; qBittorrent serves the alt UI
+    # from RootFolder's public/ subdir. Idempotent: skip if already staged. Delete the dir (or pin
+    # vuetorrent_url to a new release tag) to update.
+    creates: "/opt/qbittorrent-{{ qbt_instance }}/vuetorrent/version.txt"
+# Firefox appdata lives on the shared storage (bind-mounted as /data inside the LXC).
+# The unprivileged LXC's root can't create directories owned by the mapped uid there,
+# so we create it on the Proxmox host where the storage is the local filesystem.  UID 100000+1000 = the LXC's
+# uid-mapped equivalent of PUID 1000.
+- name: Create Firefox appdata directory on Proxmox host
+  when: qbt_firefox | default(false)
+  delegate_to: "{{ qbt_proxmox_host }}"
+  file:
+    path: "{{ qbt_host_storage }}/appdata/firefox-{{ qbt_instance }}"
+    state: directory
+    owner: "{{ 100000 + 1000 }}"
+    group: "{{ 100000 + 1000 }}"
+    mode: "0755"
+- name: Render compose
+  template:
+    src: compose.yaml.j2
+    dest: /opt/qbittorrent-{{ qbt_instance }}/compose.yaml
+    mode: "0644"
+  notify: Recreate qbittorrent stack
+- name: Deploy systemd unit
+  copy:
+    dest: /etc/systemd/system/qbittorrent-{{ qbt_instance }}.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=qbittorrent-{{ qbt_instance }} (PIA)
+      Requires=docker.service
+      After=docker.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/qbittorrent-{{ qbt_instance }}
+      ExecStart=/usr/bin/docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml up -d
+      ExecStop=/usr/bin/docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml down
+      [Install]
+      WantedBy=multi-user.target
+- name: Pull images
+  command: docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml pull
+  register: compose_pull
+  changed_when: "'Pulled' in compose_pull.stderr or 'Pulled' in compose_pull.stdout"
+- name: Enable + start stack
+  systemd:
+    name: "qbittorrent-{{ qbt_instance }}"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+- name: Install auto-update systemd service
+  template:
+    src: qbt-auto-update.service.j2
+    dest: "/etc/systemd/system/qbittorrent-{{ qbt_instance }}-auto-update.service"
+    mode: "0644"
+  notify: Reload systemd for qbt auto-update
+
+- name: Install auto-update systemd timer
+  template:
+    src: qbt-auto-update.timer.j2
+    dest: "/etc/systemd/system/qbittorrent-{{ qbt_instance }}-auto-update.timer"
+    mode: "0644"
+  notify: Reload systemd for qbt auto-update
+
+- name: Flush handlers so systemd reload happens before enabling timer
+  meta: flush_handlers
+
+- name: Enable and start auto-update timer
+  systemd:
+    name: "qbittorrent-{{ qbt_instance }}-auto-update.timer"
+    enabled: true
+    state: started
+
+- name: Wait for VPN + qbittorrent to settle
+  pause:
+    seconds: 30
+- name: Container status
+  command: docker compose -f /opt/qbittorrent-{{ qbt_instance }}/compose.yaml ps
+  register: ps_out
+  changed_when: false
+- name: Show status
+  debug:
+    var: ps_out.stdout_lines

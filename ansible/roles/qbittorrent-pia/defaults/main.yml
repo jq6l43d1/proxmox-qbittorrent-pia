@@ -1,0 +1,35 @@
+---
+# Required per host (set in the inventory):
+#   qbt_instance  short name, used for the stack dir, container names and config dir
+#   pia_loc       preferred PIA region id (must support port forwarding)
+#
+# Required for the group (keep these in an ansible-vault file, see group_vars/):
+#   pia_user, pia_pass            PIA account credentials
+#   qbt_webui_password_pbkdf2     WebUI password hash (scripts/qbt-password-hash.py)
+
+# Regions tried in order after pia_loc when port forwarding dies on the current one.
+pia_loc_fallbacks: []
+
+# Networks that may reach the WebUI through the VPN container's firewall.
+qbt_local_networks:
+  - 192.168.0.0/16
+  - 172.16.0.0/12
+  - 10.0.0.0/8
+
+# Inventory name of the Proxmox host and the path of the shared storage on it.
+# Only used to create the Firefox sidecar's config dir (qbt_firefox: true).
+qbt_proxmox_host: proxmox
+qbt_host_storage: /tank
+
+# Optional per-instance features
+qbt_save_path: ""            # default save path, e.g. /data/games
+qbt_webui_title: ""          # WebUI instance name (browser tab title)
+qbt_incomplete_ext: false    # append .!qB to unfinished files
+qbt_vuetorrent: false        # serve VueTorrent as the WebUI
+qbt_firefox: false           # Firefox sidecar that browses through the same VPN tunnel
+qbt_firefox_port: "3001"
+vuetorrent_url: https://github.com/VueTorrent/VueTorrent/releases/latest/download/vuetorrent.zip
+
+# Nightly image update
+qbt_auto_update_schedule: "*-*-* 04:30:00"
+qbt_auto_update_random_delay: 300
